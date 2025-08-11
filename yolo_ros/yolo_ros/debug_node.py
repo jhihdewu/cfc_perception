@@ -53,6 +53,7 @@ class DebugNode(LifecycleNode):
 
         # params
         self.declare_parameter("image_reliability", QoSReliabilityPolicy.BEST_EFFORT)
+        self.declare_parameter("thermal_topic", "/t_standardized")
 
     def on_configure(self, state: LifecycleState) -> TransitionCallbackReturn:
         self.get_logger().info(f"[{self.get_name()}] Configuring...")
@@ -66,8 +67,12 @@ class DebugNode(LifecycleNode):
             depth=1,
         )
 
+        # Get thermal parameters
+        self.thermal_topic = self.get_parameter("thermal_topic").get_parameter_value().string_value
+
         # pubs
         self._dbg_pub = self.create_publisher(Image, "dbg_image", 10)
+        self._thermal_dbg_pub = self.create_publisher(Image, "thermal_dbg_image", 10)
         self._bb_markers_pub = self.create_publisher(MarkerArray, "dgb_bb_markers", 10)
         self._kp_markers_pub = self.create_publisher(MarkerArray, "dgb_kp_markers", 10)
 
@@ -86,11 +91,14 @@ class DebugNode(LifecycleNode):
         self.detections_sub = message_filters.Subscriber(
             self, DetectionArray, "detections", qos_profile=10
         )
+        self.thermal_sub = message_filters.Subscriber(
+            self, Image, self.thermal_topic, qos_profile=self.image_qos_profile
+        )
 
         self._synchronizer = message_filters.ApproximateTimeSynchronizer(
-            (self.image_sub, self.detections_sub), 10, 0.5
+            (self.image_sub, self.detections_sub, self.thermal_sub), 10, 0.5
         )
-        self._synchronizer.registerCallback(self.detections_cb)
+        self._synchronizer.registerCallback(self.detections_with_thermal_cb)
 
         super().on_activate(state)
         self.get_logger().info(f"[{self.get_name()}] Activated")
@@ -102,6 +110,7 @@ class DebugNode(LifecycleNode):
 
         self.destroy_subscription(self.image_sub.sub)
         self.destroy_subscription(self.detections_sub.sub)
+        self.destroy_subscription(self.thermal_sub.sub)
 
         del self._synchronizer
 
@@ -114,6 +123,7 @@ class DebugNode(LifecycleNode):
         self.get_logger().info(f"[{self.get_name()}] Cleaning up...")
 
         self.destroy_publisher(self._dbg_pub)
+        self.destroy_publisher(self._thermal_dbg_pub)
         self.destroy_publisher(self._bb_markers_pub)
         self.destroy_publisher(self._kp_markers_pub)
 
@@ -371,6 +381,74 @@ class DebugNode(LifecycleNode):
         self._dbg_pub.publish(
             self.cv_bridge.cv2_to_imgmsg(cv_image, encoding="bgr8", header=img_msg.header)
         )
+        self._bb_markers_pub.publish(bb_marker_array)
+        self._kp_markers_pub.publish(kp_marker_array)
+
+    def detections_with_thermal_cb(self, img_msg: Image, detection_msg: DetectionArray, thermal_msg: Image) -> None:
+        # Process RGB image (same as original)
+        cv_image = self.cv_bridge.imgmsg_to_cv2(img_msg, desired_encoding="bgr8")
+        
+        # Process thermal image (already colorized/standardized)
+        try:
+            # Convert thermal image (assuming bgr8 format from /t_standardized topic)
+            thermal_colored = self.cv_bridge.imgmsg_to_cv2(thermal_msg, desired_encoding="bgr8")
+            
+        except Exception as e:
+            self.get_logger().error(f"Failed to process thermal image: {e}")
+            # Fallback: create a black image with same dimensions as RGB
+            thermal_colored = np.zeros_like(cv_image)
+
+        bb_marker_array = MarkerArray()
+        kp_marker_array = MarkerArray()
+
+        detection: Detection
+        for detection in detection_msg.detections:
+
+            # random color
+            class_name = detection.class_name
+
+            if class_name not in self._class_to_color:
+                r = random.randint(0, 255)
+                g = random.randint(0, 255)
+                b = random.randint(0, 255)
+                self._class_to_color[class_name] = (r, g, b)
+
+            color = self._class_to_color[class_name]
+
+            # Draw on RGB image
+            cv_image = self.draw_box(cv_image, detection, color)
+            cv_image = self.draw_mask(cv_image, detection, color)
+            cv_image = self.draw_keypoints(cv_image, detection)
+
+            # Draw same annotations on thermal image
+            thermal_colored = self.draw_box(thermal_colored, detection, color)
+            thermal_colored = self.draw_mask(thermal_colored, detection, color)
+            thermal_colored = self.draw_keypoints(thermal_colored, detection)
+
+            if detection.bbox3d.frame_id:
+                marker = self.create_bb_marker(detection, color)
+                marker.header.stamp = img_msg.header.stamp
+                marker.id = len(bb_marker_array.markers)
+                bb_marker_array.markers.append(marker)
+
+            if detection.keypoints3d.frame_id:
+                for kp in detection.keypoints3d.data:
+                    marker = self.create_kp_marker(kp)
+                    marker.header.frame_id = detection.keypoints3d.frame_id
+                    marker.header.stamp = img_msg.header.stamp
+                    marker.id = len(kp_marker_array.markers)
+                    kp_marker_array.markers.append(marker)
+
+        # publish RGB debug image
+        self._dbg_pub.publish(
+            self.cv_bridge.cv2_to_imgmsg(cv_image, encoding="bgr8", header=img_msg.header)
+        )
+        
+        # publish thermal debug image
+        self._thermal_dbg_pub.publish(
+            self.cv_bridge.cv2_to_imgmsg(thermal_colored, encoding="bgr8", header=thermal_msg.header)
+        )
+        
         self._bb_markers_pub.publish(bb_marker_array)
         self._kp_markers_pub.publish(kp_marker_array)
 
