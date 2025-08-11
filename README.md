@@ -4,11 +4,11 @@ This is based on [yolo_ros](https://github.com/mgonzs13/yolo_ros), a ROS 2 wrapp
 
 ## Table of Contents
 
-* [Background](#Background)
-* [Tasks](#Tasks)
-* [Outcome](#Outcome)
-* [Usage](#Usage)
-* [DataFlow and topics](#DataFlow)
+* [Background](#background)
+* [Tasks](#tasks)
+* [Outcome](#outcome)
+* [Usage](#usage)
+* [DataFlow and topics](#dataflow-and-topics-selective)
 
 
 ## Background
